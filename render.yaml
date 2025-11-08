@@ -26,5 +26,6 @@ databases:
   - name: ggv-brain-db
     databaseName: ggv_brain
     user: ggv_brain_user
+    plan: flexible
     instanceType: Basic-1gb
     storage: 10GB
