@@ -524,6 +524,58 @@ class DatabaseService:
         """Close database connection."""
         if self.conn:
             self.conn.close()
+    
+    def log_scan_summary(
+        self,
+        scan_date: date,
+        companies_found: int,
+        companies_scored: int,
+        high_scores_count: int,
+        emails_sent: int,
+        duration_seconds: int,
+        status: str = 'success',
+        error_message: str = None,
+    ):
+        """Log daily scan metrics to scan_history."""
+        if not self.conn:
+            self.connect()
+        
+        try:
+            cursor = self.conn.cursor()
+            query = """
+                INSERT INTO scan_history
+                (scan_date, companies_found, companies_scored, high_scores_count,
+                 emails_sent, scan_duration_seconds, status, error_message)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (scan_date) DO UPDATE SET
+                    companies_found = EXCLUDED.companies_found,
+                    companies_scored = EXCLUDED.companies_scored,
+                    high_scores_count = EXCLUDED.high_scores_count,
+                    emails_sent = EXCLUDED.emails_sent,
+                    scan_duration_seconds = EXCLUDED.scan_duration_seconds,
+                    status = EXCLUDED.status,
+                    error_message = EXCLUDED.error_message,
+                    updated_at = NOW()
+            """
+            cursor.execute(
+                query,
+                (
+                    scan_date,
+                    companies_found,
+                    companies_scored,
+                    high_scores_count,
+                    emails_sent,
+                    duration_seconds,
+                    status,
+                    error_message,
+                ),
+            )
+            self.conn.commit()
+            cursor.close()
+        except Exception as e:
+            logger.error(f"Error logging scan summary: {e}")
+            if self.conn:
+                self.conn.rollback()
 
 
 class EmailAlertService:
@@ -616,10 +668,11 @@ class EmailAlertService:
 
 def main():
     """Main workflow execution."""
+    run_start = datetime.now()
     logger.info("="*80)
     logger.info("WORKFLOW 1: CRUNCHBASE DAILY MONITOR")
     logger.info("="*80)
-    logger.info(f"Started: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    logger.info(f"Started: {run_start.strftime('%Y-%m-%d %H:%M:%S')}")
     logger.info("")
     
     # Initialize services
@@ -649,6 +702,7 @@ def main():
     
     # Process each company
     high_score_count = 0
+    companies_scored = 0
     
     for i, company in enumerate(companies, 1):
         logger.info(f"{i}/{len(companies)}: {company.get('name')}")
@@ -682,6 +736,8 @@ def main():
             email_service.send_founder_alert(company, score_result, linkedin_url)
             high_score_count += 1
         
+        companies_scored += 1
+        
         logger.info("")
     
     # Summary
@@ -691,10 +747,22 @@ def main():
     logger.info(f"Companies scanned: {len(companies)}")
     logger.info(f"High scores (>= 8.0): {high_score_count}")
     logger.info(f"Email alerts sent: {high_score_count}")
-    logger.info(f"Completed: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    run_end = datetime.now()
+    logger.info(f"Completed: {run_end.strftime('%Y-%m-%d %H:%M:%S')}")
     
     # Close database
     if db:
+        try:
+            db.log_scan_summary(
+                scan_date=run_start.date(),
+                companies_found=len(companies),
+                companies_scored=companies_scored,
+                high_scores_count=high_score_count,
+                emails_sent=high_score_count,
+                duration_seconds=int((run_end - run_start).total_seconds()),
+            )
+        except Exception as e:
+            logger.error(f"Failed to log scan summary: {e}")
         db.close()
 
 
