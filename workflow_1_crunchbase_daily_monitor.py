@@ -189,12 +189,24 @@ class CrunchbaseScanner:
                     has_founders = len(founder_identifiers) > 0 if founder_identifiers else False
                     
                     if has_usa and has_founders:
+                        identifier = props.get('identifier')
+                        if isinstance(identifier, dict):
+                            identifier = identifier.get('value', '')
+                        
+                        website = props.get('website')
+                        if isinstance(website, dict):
+                            website = website.get('value', '')
+                        
+                        founded_on = props.get('founded_on', '')
+                        if isinstance(founded_on, dict):
+                            founded_on = founded_on.get('value', '')
+                        
                         companies.append({
                             'name': props.get('name', ''),
-                            'identifier': props.get('identifier', {}).get('value') if isinstance(props.get('identifier'), dict) else props.get('identifier', ''),
+                            'identifier': identifier or '',
                             'description': props.get('description', '') or props.get('short_description', ''),
-                            'website': props.get('website', {}).get('value', '') if isinstance(props.get('website'), dict) else props.get('website', ''),
-                            'founded_on': props.get('founded_on', ''),
+                            'website': website or '',
+                            'founded_on': founded_on or '',
                             'categories': props.get('categories', []),
                             'founder_identifiers': founder_identifiers
                         })
@@ -461,11 +473,22 @@ class DatabaseService:
         try:
             cursor = self.conn.cursor()
             
+            founded_on = company.get('founded_on')
+            founded_year = None
+            if founded_on:
+                try:
+                    founded_year = int(str(founded_on)[:4])
+                except (ValueError, TypeError):
+                    founded_year = None
+            
+            crunchbase_identifier = company.get('identifier', '')
+            crunchbase_url = f"https://www.crunchbase.com/organization/{crunchbase_identifier}" if crunchbase_identifier else None
+            
             query = """
                 INSERT INTO scored_companies 
-                (name, crunchbase_url, founded_year, description, website, linkedin_url,
+                (name, crunchbase_url, crunchbase_identifier, founded_year, description, website, linkedin_url,
                  v11_5_score, predicted_probability, features, top_features, emailed)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (name) DO UPDATE SET
                     v11_5_score = EXCLUDED.v11_5_score,
                     predicted_probability = EXCLUDED.predicted_probability,
@@ -474,8 +497,9 @@ class DatabaseService:
             
             cursor.execute(query, (
                 company.get('name'),
-                f"https://www.crunchbase.com/organization/{company.get('identifier', '')}",
-                int(company.get('founded_on', '2025')[:4]),
+                crunchbase_url,
+                crunchbase_identifier,
+                founded_year,
                 company.get('description'),
                 company.get('website'),
                 linkedin_url,
