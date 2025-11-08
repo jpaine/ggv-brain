@@ -554,8 +554,7 @@ class DatabaseService:
                     emails_sent = EXCLUDED.emails_sent,
                     scan_duration_seconds = EXCLUDED.scan_duration_seconds,
                     status = EXCLUDED.status,
-                    error_message = EXCLUDED.error_message,
-                    updated_at = NOW()
+                    error_message = EXCLUDED.error_message
             """
             cursor.execute(
                 query,
