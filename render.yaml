@@ -3,6 +3,7 @@ services:
     name: ggv-brain-crunchbase-monitor
     env: python
     plan: starter
+    pythonVersion: 3.11.9
     schedule: "0 12 * * *"  # Daily at 12pm UTC (4am PST)
     buildCommand: pip install -r requirements.txt
     startCommand: python workflow_1_crunchbase_daily_monitor.py
