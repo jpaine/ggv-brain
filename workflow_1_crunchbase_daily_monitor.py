@@ -122,7 +122,7 @@ class CrunchbaseScanner:
         self.api_key = api_key
         self.base_url = "https://api.crunchbase.com/api/v4"
     
-    def search_new_ai_companies(self, days_back: int = 1) -> List[Dict]:
+    def search_new_ai_companies(self, days_back: int = 30) -> List[Dict]:
         """
         Search for AI companies founded in 2025, headquartered in USA.
         
@@ -135,8 +135,9 @@ class CrunchbaseScanner:
         logger.info(f"Searching Crunchbase for new AI companies (last {days_back} days)...")
         
         # Date range
-        end_date = datetime.now().strftime('%Y-%m-%d')
-        start_date = (datetime.now() - timedelta(days=days_back)).strftime('%Y-%m-%d')
+        now = datetime.now()
+        end_date = now.strftime('%Y-%m-%d')
+        start_date = (now - timedelta(days=days_back)).strftime('%Y-%m-%d')
         
         search_url = f"{self.base_url}/searches/organizations"
         
@@ -158,7 +159,7 @@ class CrunchbaseScanner:
                     "type": "predicate",
                     "field_id": "founded_on",
                     "operator_id": "gte",
-                    "values": ["2025-01-01"]
+                        "values": [start_date]
                 },
                 {
                     "type": "predicate",
@@ -729,11 +730,13 @@ def main():
         if db:
             db.save_scored_company(company, score_result, linkedin_url)
         
-        # Send email alert if high score
-        if score_result.get('score', 0) >= 8.0:
-            logger.info(f"  🚀 HIGH SCORE - Sending email alert")
-            email_service.send_founder_alert(company, score_result, linkedin_url)
+        # Send email alert for every scored founder
+        email_sent = email_service.send_founder_alert(company, score_result, linkedin_url)
+        if email_sent:
+            logger.info("  📧 Email alert sent")
             high_score_count += 1
+        else:
+            logger.warning("  ⚠️ Email alert failed")
         
         companies_scored += 1
         
