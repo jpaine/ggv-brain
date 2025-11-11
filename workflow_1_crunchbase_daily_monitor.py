@@ -593,20 +593,19 @@ class EmailAlertService:
         self.api_url = "https://api.resend.com/emails"
     
     def send_founder_alert(self, company: Dict, score_result: Dict, linkedin_url: str = None):
-        """Send email alert for high-scoring founder (score >= 8.0)."""
+        """Send email alert for every founder, with appropriate classification based on score."""
         score = score_result.get('score', 0)
-        
-        # Only send emails for high-potential founders (score >= 8.0)
-        if score < 8.0:
-            logger.info(f"  ⏭️  Skipping email for {company.get('name')} (score {score:.1f} < 8.0 threshold)")
-            return False
         
         try:
             # Use different subject/header based on score
             if score >= 8.0:
                 subject = f"🚀 GGV Brain Alert: {company.get('name')} - Score {score:.1f}/10 (High Potential)"
+            elif score >= 7.0:
+                subject = f"📊 GGV Brain Alert: {company.get('name')} - Score {score:.1f}/10 (Strong)"
+            elif score >= 5.0:
+                subject = f"📊 GGV Brain Update: {company.get('name')} - Score {score:.1f}/10 (Average)"
             else:
-                subject = f"📊 GGV Brain Update: {company.get('name')} - Score {score:.1f}/10"
+                subject = f"📊 GGV Brain Update: {company.get('name')} - Score {score:.1f}/10 (Below Average)"
             
             html_content = self._generate_email_html(company, score_result, linkedin_url)
             
@@ -760,18 +759,21 @@ def main():
         
         logger.info(f"  Score: {score:.2f}/10 (probability: {score_result.get('probability'):.1%})")
         
-        # Send email alert ONLY for high-potential founders (score >= 8.0)
-        # This matches the model's 73.3% accuracy threshold
-        if score >= 8.0:
-            email_sent = email_service.send_founder_alert(company, score_result, linkedin_url)
-            if email_sent:
+        # Send email alert for every founder (regardless of score)
+        # Email content will be classified appropriately based on score
+        email_sent = email_service.send_founder_alert(company, score_result, linkedin_url)
+        if email_sent:
+            if score >= 8.0:
                 logger.info("  📧 Email alert sent (high potential)")
                 high_score_count += 1
+            elif score >= 7.0:
+                logger.info("  📧 Email alert sent (strong)")
+            elif score >= 5.0:
+                logger.info("  📧 Email alert sent (average)")
             else:
-                logger.warning("  ⚠️ Email alert failed")
+                logger.info("  📧 Email alert sent (below average)")
         else:
-            logger.info(f"  ⏭️  Score {score:.1f} below 8.0 threshold - no email sent")
-            email_sent = False
+            logger.warning("  ⚠️ Email alert failed")
         
         # Save to database (mark as emailed if email was sent)
         if db:
@@ -788,7 +790,7 @@ def main():
     logger.info(f"Companies scanned: {len(companies)}")
     logger.info(f"Companies scored: {companies_scored}")
     logger.info(f"High-potential founders (>= 8.0): {high_score_count}")
-    logger.info(f"Email alerts sent: {high_score_count}")
+    logger.info(f"Total email alerts sent: {companies_scored}")
     run_end = datetime.now()
     logger.info(f"Completed: {run_end.strftime('%Y-%m-%d %H:%M:%S')}")
     
