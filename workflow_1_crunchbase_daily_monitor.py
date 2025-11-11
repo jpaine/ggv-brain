@@ -466,7 +466,7 @@ class DatabaseService:
             logger.error(f"Error connecting to database: {e}")
             raise
     
-    def save_scored_company(self, company: Dict, score_result: Dict, linkedin_url: str = None):
+    def save_scored_company(self, company: Dict, score_result: Dict, linkedin_url: str = None, emailed: bool = False):
         """Save scored company to database."""
         if not self.conn:
             self.connect()
@@ -488,13 +488,17 @@ class DatabaseService:
             query = """
                 INSERT INTO scored_companies 
                 (name, crunchbase_url, crunchbase_identifier, founded_year, description, website, linkedin_url,
-                 v11_5_score, predicted_probability, features, top_features, emailed)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                 v11_5_score, predicted_probability, features, top_features, emailed, email_sent_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (name) DO UPDATE SET
                     v11_5_score = EXCLUDED.v11_5_score,
                     predicted_probability = EXCLUDED.predicted_probability,
+                    emailed = EXCLUDED.emailed,
+                    email_sent_at = CASE WHEN EXCLUDED.emailed THEN EXCLUDED.email_sent_at ELSE scored_companies.email_sent_at END,
                     updated_at = NOW()
             """
+            
+            email_sent_at = datetime.now() if emailed else None
             
             cursor.execute(query, (
                 company.get('name'),
@@ -508,7 +512,8 @@ class DatabaseService:
                 score_result.get('probability'),
                 Json({}),  # features dict
                 Json(score_result.get('top_features', [])),
-                score_result.get('score', 0) >= 8.0  # Mark as emailed if high score
+                emailed,
+                email_sent_at
             ))
             
             self.conn.commit()
@@ -690,8 +695,8 @@ def main():
         logger.warning("⚠️ No DATABASE_URL provided, skipping database saves")
         db = None
     
-    # Search for new companies
-    companies = crunchbase.search_new_ai_companies(days_back=1)
+    # Search for new companies (last 30 days)
+    companies = crunchbase.search_new_ai_companies(days_back=30)
     
     if not companies:
         logger.info("No new companies found")
@@ -726,10 +731,6 @@ def main():
         
         logger.info(f"  Score: {score_result.get('score'):.2f}/10 (probability: {score_result.get('probability'):.1%})")
         
-        # Save to database
-        if db:
-            db.save_scored_company(company, score_result, linkedin_url)
-        
         # Send email alert for every scored founder
         email_sent = email_service.send_founder_alert(company, score_result, linkedin_url)
         if email_sent:
@@ -737,6 +738,10 @@ def main():
             high_score_count += 1
         else:
             logger.warning("  ⚠️ Email alert failed")
+        
+        # Save to database (mark as emailed if email was sent)
+        if db:
+            db.save_scored_company(company, score_result, linkedin_url, emailed=email_sent)
         
         companies_scored += 1
         
