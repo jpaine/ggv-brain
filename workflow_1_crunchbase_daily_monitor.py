@@ -593,9 +593,20 @@ class EmailAlertService:
         self.api_url = "https://api.resend.com/emails"
     
     def send_founder_alert(self, company: Dict, score_result: Dict, linkedin_url: str = None):
-        """Send email alert for high-scoring founder."""
+        """Send email alert for high-scoring founder (score >= 8.0)."""
+        score = score_result.get('score', 0)
+        
+        # Only send emails for high-potential founders (score >= 8.0)
+        if score < 8.0:
+            logger.info(f"  ⏭️  Skipping email for {company.get('name')} (score {score:.1f} < 8.0 threshold)")
+            return False
+        
         try:
-            subject = f"🚀 GGV Brain Alert: {company.get('name')} - Score {score_result.get('score'):.1f}/10"
+            # Use different subject/header based on score
+            if score >= 8.0:
+                subject = f"🚀 GGV Brain Alert: {company.get('name')} - Score {score:.1f}/10 (High Potential)"
+            else:
+                subject = f"📊 GGV Brain Update: {company.get('name')} - Score {score:.1f}/10"
             
             html_content = self._generate_email_html(company, score_result, linkedin_url)
             
@@ -626,6 +637,8 @@ class EmailAlertService:
     
     def _generate_email_html(self, company: Dict, score_result: Dict, linkedin_url: str = None) -> str:
         """Generate HTML email content."""
+        score = score_result.get('score', 0)
+        
         top_features_html = ''.join([
             f"<li><strong>{f['feature']}</strong>: {f['value']:.3f} (importance: {f['importance']:.1%})</li>"
             for f in score_result.get('top_features', [])
@@ -633,14 +646,29 @@ class EmailAlertService:
         
         linkedin_html = f'<p><strong>Founder LinkedIn:</strong> <a href="{linkedin_url}">{linkedin_url}</a></p>' if linkedin_url else ''
         
+        # Conditional header and color based on score
+        if score >= 8.0:
+            header = "🚀 High-Potential Founder Alert"
+            score_color = "#1a73e8"  # Blue for high scores
+            alert_note = "✅ Strong investment signal - Score meets 8.0+ threshold"
+        elif score >= 7.0:
+            header = "📊 Strong Founder Alert"
+            score_color = "#34a853"  # Green for good scores
+            alert_note = "⚠️ Worth deep dive - Score above 7.0"
+        else:
+            header = "📊 Founder Score Update"
+            score_color = "#ea4335"  # Red for low scores
+            alert_note = "❌ Below threshold - Score < 8.0 (not high potential)"
+        
         html = f"""
         <html>
         <body style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
-            <h2 style="color: #1a73e8;">🚀 High-Potential Founder Alert</h2>
+            <h2 style="color: {score_color};">{header}</h2>
             
             <div style="background: #f5f5f5; padding: 20px; border-radius: 8px; margin: 20px 0;">
                 <h3 style="margin-top: 0;">{company.get('name')}</h3>
-                <p><strong>V11.5 Score:</strong> <span style="font-size: 24px; color: #1a73e8; font-weight: bold;">{score_result.get('score'):.1f}/10</span></p>
+                <p><strong>V11.5 Score:</strong> <span style="font-size: 24px; color: {score_color}; font-weight: bold;">{score_result.get('score'):.1f}/10</span></p>
+                <p style="color: {score_color}; font-weight: bold;">{alert_note}</p>
                 <p><strong>Probability:</strong> {score_result.get('probability'):.1%}</p>
                 <p><strong>Founded:</strong> {company.get('founded_on', 'N/A')}</p>
                 <p><strong>Website:</strong> <a href="{company.get('website', '#')}">{company.get('website', 'N/A')}</a></p>
@@ -728,16 +756,22 @@ def main():
         
         # Score with V11.5
         score_result = model.score_founder(features)
+        score = score_result.get('score', 0)
         
-        logger.info(f"  Score: {score_result.get('score'):.2f}/10 (probability: {score_result.get('probability'):.1%})")
+        logger.info(f"  Score: {score:.2f}/10 (probability: {score_result.get('probability'):.1%})")
         
-        # Send email alert for every scored founder
-        email_sent = email_service.send_founder_alert(company, score_result, linkedin_url)
-        if email_sent:
-            logger.info("  📧 Email alert sent")
-            high_score_count += 1
+        # Send email alert ONLY for high-potential founders (score >= 8.0)
+        # This matches the model's 73.3% accuracy threshold
+        if score >= 8.0:
+            email_sent = email_service.send_founder_alert(company, score_result, linkedin_url)
+            if email_sent:
+                logger.info("  📧 Email alert sent (high potential)")
+                high_score_count += 1
+            else:
+                logger.warning("  ⚠️ Email alert failed")
         else:
-            logger.warning("  ⚠️ Email alert failed")
+            logger.info(f"  ⏭️  Score {score:.1f} below 8.0 threshold - no email sent")
+            email_sent = False
         
         # Save to database (mark as emailed if email was sent)
         if db:
@@ -752,7 +786,8 @@ def main():
     logger.info("DAILY SCAN SUMMARY")
     logger.info("="*80)
     logger.info(f"Companies scanned: {len(companies)}")
-    logger.info(f"High scores (>= 8.0): {high_score_count}")
+    logger.info(f"Companies scored: {companies_scored}")
+    logger.info(f"High-potential founders (>= 8.0): {high_score_count}")
     logger.info(f"Email alerts sent: {high_score_count}")
     run_end = datetime.now()
     logger.info(f"Completed: {run_end.strftime('%Y-%m-%d %H:%M:%S')}")
