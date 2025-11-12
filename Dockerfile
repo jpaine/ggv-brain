@@ -14,10 +14,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy application code
 COPY workflow_1_crunchbase_daily_monitor.py .
-COPY phase5_pitch_quality_features.py .
-COPY v11_5_phase5_model_20251105_170709.pkl .
-COPY v11_5_phase5_scaler_20251105_170709.pkl .
-COPY v11_5_phase5_config_20251105_170709.json .
+COPY phase2_real_feature_calculations.py .
+COPY v11_6_1_model_20251112_170640.pkl .
+COPY v11_6_1_scaler_20251112_170640.pkl .
 
 # Run workflow
 CMD ["python", "workflow_1_crunchbase_daily_monitor.py"]

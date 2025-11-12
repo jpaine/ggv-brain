@@ -5,10 +5,10 @@ Workflow 1: Automated Daily Crunchbase Monitoring
 
 Daily cron job that:
 1. Scans Crunchbase for new AI companies (founded 2025, USA, with founder LinkedIn)
-2. Extracts 29 V11.5 features for each founder
-3. Scores with V11.5 model (73.3% accuracy)
+2. Extracts 18 V11.6.1 features for each founder
+3. Scores with V11.6.1 model (66.7% accuracy)
 4. Saves all to PostgreSQL
-5. Emails jeff@goldengate.vc for scores >= 8.0
+5. Emails jeff@goldengate.vc for all founders (classified by score)
 
 Deployment: Render (daily cron at 12pm UTC / 4am PST)
 """
@@ -25,6 +25,11 @@ import numpy as np
 from datetime import datetime, timedelta, date
 from typing import Dict, List, Optional
 import logging
+import asyncio
+import aiohttp
+import ssl
+import certifi
+import re
 
 # Setup logging
 logging.basicConfig(
@@ -37,46 +42,50 @@ logger = logging.getLogger(__name__)
 CRUNCHBASE_API_KEY = os.getenv('CRUNCHBASE_API_KEY', '948f87e1734828b47f1232c4c4c9bcf9')
 ENRICHLAYER_API_KEY = os.getenv('ENRICHLAYER_API_KEY', '-RbBxHU8AtMyH1dacibNKA')
 RESEND_API_KEY = os.getenv('RESEND_API_KEY', 're_4D7gm8JB_4An2NRYKxWT1VuFXabqPnhD3')
+PERPLEXITY_API_KEY = os.getenv('PERPLEXITY_API_KEY', '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')
 RECIPIENT_EMAIL = os.getenv('RECIPIENT_EMAIL', 'jeff@goldengate.vc')
 FROM_EMAIL = os.getenv('FROM_EMAIL', 'ggv-brain@goldengate.vc')
 DATABASE_URL = os.getenv('DATABASE_URL')
 
-# V11.5 feature order (29 features total)
+# V11.6.1 feature order (18 features total - all using real calculations)
 FEATURE_ORDER = [
-    # V11.4 features (21)
-    'l_level', 'estimated_age', 'founder_experience_score',
-    'timing_score', 'market_size_billion', 'cagr_percent', 
-    'competitor_count', 'market_maturity_stage',
-    'confidence_score', 'confidence_score_market', 'geographic_advantage',
-    'description_sentiment', 'description_complexity', 'about_quality',
-    'sector_keyword_score', 'founder_market_fit',
-    'market_saturation_score', 'differentiation_score',
-    'momentum_3m', 'timing_score_trend', 'competitor_growth_rate',
-    # Phase 5 features (10)
-    'is_serial_founder', 'founder_experience_years',
-    'linkedin_industry_connections_ratio', 'linkedin_influencer_connections',
-    'linkedin_2nd_degree_reach', 'barrier_to_entry_score',
-    'pitch_clarity_score', 'pitch_specificity_score',
-    'vision_realism_score', 'narrative_coherence_score'
+    'l_level',
+    'estimated_age',
+    'founder_experience_score',
+    'timing_score',
+    'market_size_billion',
+    'cagr_percent',
+    'competitor_count',
+    'market_maturity_stage',
+    'confidence_score',
+    'confidence_score_market',  # Real calculation from market data quality
+    'geographic_advantage',
+    'description_sentiment',
+    'description_complexity',
+    'about_quality',
+    'sector_keyword_score',
+    'founder_market_fit',
+    'market_saturation_score',
+    'differentiation_score'
 ]
 
 
-class V11_5_Model:
-    """V11.5 model loader and scorer."""
+class V11_6_1_Model:
+    """V11.6.1 model loader and scorer."""
     
-    def __init__(self, model_path='v11_5_phase5_model_20251105_170709.pkl',
-                 scaler_path='v11_5_phase5_scaler_20251105_170709.pkl'):
-        """Load V11.5 model and scaler."""
-        logger.info("Loading V11.5 model...")
+    def __init__(self, model_path='v11_6_1_model_20251112_170640.pkl',
+                 scaler_path='v11_6_1_scaler_20251112_170640.pkl'):
+        """Load V11.6.1 model and scaler."""
+        logger.info("Loading V11.6.1 model...")
         
         self.model = pickle.load(open(model_path, 'rb'))
         self.scaler = pickle.load(open(scaler_path, 'rb'))
         
-        logger.info("✅ V11.5 model loaded successfully")
+        logger.info("✅ V11.6.1 model loaded successfully")
     
     def score_founder(self, features: Dict) -> Dict:
         """
-        Score a founder with V11.5 model.
+        Score a founder with V11.6.1 model.
         
         Returns:
             Dict with score, probability, and feature importance
@@ -181,6 +190,7 @@ class CrunchbaseScanner:
                 companies = []
                 for entity in entities:
                     props = entity.get('properties', {})
+                    entity_uuid = entity.get('uuid', '')  # Get UUID from entity, not from props
                     
                     # Filter for USA and has founder LinkedIn
                     location = props.get('location_identifiers', [])
@@ -202,14 +212,16 @@ class CrunchbaseScanner:
                         if isinstance(founded_on, dict):
                             founded_on = founded_on.get('value', '')
                         
+                        # Store UUID for later use in getting founder entity IDs
                         companies.append({
                             'name': props.get('name', ''),
                             'identifier': identifier or '',
+                            'uuid': entity_uuid,  # Store UUID for entity endpoint access
                             'description': props.get('description', '') or props.get('short_description', ''),
                             'website': website or '',
                             'founded_on': founded_on or '',
                             'categories': props.get('categories', []),
-                            'founder_identifiers': founder_identifiers
+                            'founder_identifiers': founder_identifiers  # Keep original for now
                         })
                 
                 logger.info(f"✅ Found {len(companies)} companies (filtered for USA + founders)")
@@ -221,6 +233,131 @@ class CrunchbaseScanner:
         except Exception as e:
             logger.error(f"Error searching Crunchbase: {e}")
             return []
+    
+    def get_founder_entity_ids_from_company(self, company_uuid: str) -> tuple[List[str], List[Dict]]:
+        """
+        Get founder entity IDs and full founder data from company entity using UUID.
+        
+        Args:
+            company_uuid: Company entity UUID
+        
+        Returns:
+            Tuple of (founder_entity_ids, founder_data_list)
+            - founder_entity_ids: List of founder entity IDs (format: "person/{uuid}")
+            - founder_data_list: List of founder dictionaries with LinkedIn URLs from founder card
+        """
+        if not company_uuid:
+            return [], []
+        
+        try:
+            url = f"{self.base_url}/entities/organizations/{company_uuid}"
+            headers = {
+                'accept': 'application/json',
+                'X-cb-user-key': self.api_key
+            }
+            params = {'card_ids': 'founders'}
+            
+            response = requests.get(url, headers=headers, params=params, timeout=30)
+            
+            if response.status_code == 200:
+                data = response.json()
+                cards = data.get('cards', {})
+                founders_list = cards.get('founders', [])
+                
+                founder_ids = []
+                founder_data = []
+                for founder in founders_list:
+                    # Extract UUID from founder identifier
+                    identifier_obj = founder.get('identifier', {})
+                    if isinstance(identifier_obj, dict):
+                        founder_uuid = identifier_obj.get('uuid', '')
+                        founder_name = identifier_obj.get('value', 'Unknown')
+                        if founder_uuid:
+                            founder_ids.append(f"person/{founder_uuid}")
+                            
+                            # Extract LinkedIn URL from founder card
+                            linkedin = founder.get('linkedin', {})
+                            linkedin_url = linkedin.get('value', '') if isinstance(linkedin, dict) else ''
+                            
+                            founder_data.append({
+                                'id': f"person/{founder_uuid}",
+                                'name': founder_name,
+                                'linkedin_url': linkedin_url,
+                                'first_name': founder.get('first_name', ''),
+                                'last_name': founder.get('last_name', ''),
+                                'title': founder.get('short_description', '')
+                            })
+                
+                return founder_ids, founder_data
+            else:
+                logger.warning(f"Could not fetch company {company_uuid}: {response.status_code}")
+                return [], []
+        
+        except Exception as e:
+            logger.error(f"Error fetching founders for company {company_uuid}: {e}")
+            return [], []
+    
+    def get_founder_details(self, founder_identifiers: List[str]) -> List[Dict]:
+        """
+        Get detailed founder information including LinkedIn URLs from Crunchbase.
+        
+        Args:
+            founder_identifiers: List of founder entity IDs from Crunchbase
+        
+        Returns:
+            List of founder dictionaries with name, LinkedIn URL, etc.
+        """
+        if not founder_identifiers:
+            return []
+        
+        founders = []
+        headers = {
+            'accept': 'application/json',
+            'X-cb-user-key': self.api_key
+        }
+        
+        for founder_id in founder_identifiers:
+            try:
+                # Get founder entity data
+                # Handle both "person/{uuid}" format and just UUID
+                if '/' in founder_id:
+                    # Extract UUID from "person/{uuid}" format
+                    founder_uuid = founder_id.split('/')[-1]
+                else:
+                    founder_uuid = founder_id
+                
+                founder_url = f"{self.base_url}/entities/people/{founder_uuid}"
+                response = requests.get(founder_url, headers=headers, timeout=30)
+                
+                if response.status_code == 200:
+                    data = response.json()
+                    props = data.get('properties', {})
+                    
+                    # Extract LinkedIn URL
+                    linkedin = props.get('linkedin', {})
+                    linkedin_url = linkedin.get('value', '') if isinstance(linkedin, dict) else ''
+                    
+                    # Extract other founder details
+                    identifier = props.get('identifier', {})
+                    name = identifier.get('value', 'Unknown') if isinstance(identifier, dict) else props.get('name', 'Unknown')
+                    
+                    founders.append({
+                        'id': founder_id,
+                        'name': name,
+                        'linkedin_url': linkedin_url,
+                        'first_name': props.get('first_name', ''),
+                        'last_name': props.get('last_name', ''),
+                        'title': props.get('short_description', '')
+                    })
+                    logger.info(f"  ✅ Found founder: {name} (LinkedIn: {'Yes' if linkedin_url else 'No'})")
+                else:
+                    logger.warning(f"  ⚠️ Could not fetch founder {founder_id}: {response.status_code}")
+            
+            except Exception as e:
+                logger.error(f"  ❌ Error fetching founder {founder_id}: {e}")
+                continue
+        
+        return founders
 
 
 class EnrichlayerService:
@@ -255,131 +392,300 @@ class EnrichlayerService:
             return None
 
 
-class FeatureExtractor:
-    """Extract all 29 V11.5 features from company data."""
+class PerplexityMarketService:
+    """Get market analysis using Perplexity API."""
     
-    def extract_features(self, company: Dict, linkedin_profile: Optional[Dict] = None) -> Dict:
+    def __init__(self, api_key: str):
+        self.api_key = api_key
+        self.api_url = "https://api.perplexity.ai/chat/completions"
+    
+    async def get_market_analysis(self, company_name: str, description: str, categories: List[str]) -> Optional[Dict]:
         """
-        Extract all 29 V11.5 features.
+        Get market analysis from Perplexity API.
+        
+        Args:
+            company_name: Company name
+            description: Company description
+            categories: List of category strings
+        
+        Returns:
+            Dictionary with market_size_millions, cagr_percent, competitor_count, timing_score, momentum_score
+            Returns None if API call fails (no defaults per requirement)
+        """
+        if not self.api_key:
+            logger.error("Perplexity API key not set")
+            return None
+        
+        category_str = ', '.join(categories) if categories else 'Technology'
+        
+        prompt = f"""
+        Analyze the market opportunity for this REAL startup:
+        
+        Company: {company_name}
+        Description: {description}
+        Categories: {category_str}
+        
+        Provide realistic market analysis focusing on:
+        1. Market size in millions USD (serviceable addressable market for startups - what a startup could realistically capture in 3-5 years)
+        2. CAGR percentage (realistic growth rate)
+        3. Competitor count (number of direct competitors)
+        4. Market timing score (0-1, how well timed is this market entry)
+        5. Market momentum score (0-1, how much momentum does this market have)
+        
+        IMPORTANT: Focus on the SERVICEABLE market that startups can realistically address, not the total industry size. Typical startup markets are $100M-$5B, not trillions.
+        
+        Format your response as JSON:
+        {{
+            "market_size_millions": 2500,
+            "cagr_percent": 25.0,
+            "competitor_count": 35.0,
+            "timing_score": 0.85,
+            "momentum_score": 0.80
+        }}
+        """
+        
+        try:
+            headers = {
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json"
+            }
+            
+            payload = {
+                "model": "sonar-pro",
+                "messages": [
+                    {"role": "user", "content": prompt}
+                ],
+                "temperature": 0.1
+            }
+            
+            # Create SSL context with certifi certificates
+            ssl_context = ssl.create_default_context(cafile=certifi.where())
+            
+            async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=ssl_context)) as session:
+                async with session.post(self.api_url, headers=headers, json=payload, timeout=60) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        content = data.get('choices', [{}])[0].get('message', {}).get('content', '')
+                        
+                        # Parse JSON from response (may have markdown formatting)
+                        # Try to extract JSON object from response
+                        json_match = re.search(r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*"market_size_millions"[^{}]*(?:\{[^{}]*\}[^{}]*)*\}', content, re.DOTALL)
+                        if not json_match:
+                            # Try simpler pattern
+                            json_match = re.search(r'\{.*?"market_size_millions".*?\}', content, re.DOTALL)
+                        
+                        if json_match:
+                            try:
+                                market_data = json.loads(json_match.group())
+                                
+                                # Convert market_size_millions to billions for feature
+                                market_size_millions = market_data.get('market_size_millions', 0)
+                                market_size_billions = market_size_millions / 1000.0 if market_size_millions > 0 else 0
+                                
+                                return {
+                                    'market_size_billion': market_size_billions,
+                                    'cagr_percent': float(market_data.get('cagr_percent', 0)),
+                                    'competitor_count': int(market_data.get('competitor_count', 0)),
+                                    'timing_score': float(market_data.get('timing_score', 0)),
+                                    'momentum_score': float(market_data.get('momentum_score', 0))
+                                }
+                            except json.JSONDecodeError as e:
+                                logger.error(f"JSON decode error: {e}")
+                                logger.error(f"Content snippet: {content[:500]}")
+                                return None
+                        else:
+                            logger.error(f"Could not find JSON in Perplexity response")
+                            logger.error(f"Content snippet: {content[:500]}")
+                            return None
+                    else:
+                        error_text = await response.text()
+                        logger.error(f"Perplexity API error {response.status}: {error_text[:200]}")
+                        return None
+        
+        except Exception as e:
+            logger.error(f"Error calling Perplexity API: {e}")
+            return None
+
+
+class FeatureExtractor:
+    """Extract all 18 V11.6.1 features from company data (all using real calculations)."""
+    
+    def extract_features(self, company: Dict, linkedin_profiles: Optional[List[Dict]] = None, market_analysis: Optional[Dict] = None) -> Dict:
+        """
+        Extract all 18 V11.6.1 features.
         
         Args:
             company: Crunchbase company data
-            linkedin_profile: Enrichlayer LinkedIn profile data (optional)
+            linkedin_profiles: List of Enrichlayer LinkedIn profile data (for multiple founders)
+            market_analysis: Perplexity market analysis data (optional)
         
         Returns:
-            Dictionary with all 29 features
+            Dictionary with all 18 features
         """
         features = {}
         
-        # Extract V11.4 features (19 features)
-        features.update(self._extract_v11_4_features(company, linkedin_profile))
+        # Extract V11.6.1 features (18 features - all using real calculations)
+        features.update(self._extract_v11_4_features(company, linkedin_profiles, market_analysis))
         
-        # Extract Phase 5 features (10 features)
-        features.update(self._extract_phase5_features(company, linkedin_profile))
+        # Note: Phase 5 features removed (not in V11.6.1)
+        # V11.6.1 uses only the 18 core features with real calculations
         
         return features
     
-    def _extract_v11_4_features(self, company: Dict, linkedin_profile: Optional[Dict]) -> Dict:
-        """Extract V11.4 features (simplified version for production)."""
+    def _extract_v11_4_features(self, company: Dict, linkedin_profiles: Optional[List[Dict]], market_analysis: Optional[Dict]) -> Dict:
+        """Extract V11.4 features using real data from LinkedIn and Perplexity."""
         features = {}
         
         description = company.get('description', '')
         founded_year = self._parse_year(company.get('founded_on', ''))
         
-        # Founder characteristics
-        features['l_level'] = self._estimate_l_level(linkedin_profile) if linkedin_profile else 2.0
-        features['estimated_age'] = 35.0  # Default estimate
-        features['founder_experience_score'] = self._calculate_experience_score(linkedin_profile) if linkedin_profile else 0.5
+        # Founder characteristics (aggregate across all founders)
+        if linkedin_profiles and len(linkedin_profiles) > 0:
+            l_levels = [self._estimate_l_level(profile) for profile in linkedin_profiles if profile]
+            experience_scores = [self._calculate_experience_score(profile) for profile in linkedin_profiles if profile]
+            
+            # Average across founders
+            features['l_level'] = sum(l_levels) / len(l_levels) if l_levels else 2.0
+            features['founder_experience_score'] = sum(experience_scores) / len(experience_scores) if experience_scores else 0.5
+        else:
+            features['l_level'] = 2.0
+            features['founder_experience_score'] = 0.5
         
-        # Market characteristics (require Perplexity API - use defaults for now)
-        features['timing_score'] = 0.7  # Default for 2025 AI
-        features['market_size_billion'] = 100.0  # AI market default
-        features['cagr_percent'] = 25.0  # AI market growth
-        features['competitor_count'] = 50  # Moderate competition
-        features['market_maturity_stage'] = 0.6  # Growing market
-        features['confidence_score'] = 0.7  # Moderate confidence
-        features['confidence_score_market'] = 0.7
+        # V11.6.1: Use real calculations for all features (no hardcoded defaults)
+        from phase2_real_feature_calculations import (
+            calculate_estimated_age,
+            calculate_description_sentiment,
+            calculate_founder_market_fit,
+            calculate_market_saturation_score,
+            calculate_differentiation_score,
+            calculate_confidence_score,
+            calculate_confidence_score_market
+        )
+        
+        # 1. estimated_age - Real calculation from LinkedIn
+        features['estimated_age'] = calculate_estimated_age(linkedin_profiles) if linkedin_profiles else 35.0
+        
+        # Market characteristics from Perplexity API (REAL DATA, no defaults)
+        if market_analysis:
+            features['timing_score'] = market_analysis.get('timing_score', 0.7)
+            features['market_size_billion'] = market_analysis.get('market_size_billion', 100.0)
+            features['cagr_percent'] = market_analysis.get('cagr_percent', 25.0)
+            features['competitor_count'] = market_analysis.get('competitor_count', 50)
+            
+            # Calculate market maturity stage from market size and CAGR
+            market_size = market_analysis.get('market_size_billion', 100.0)
+            if market_size > 5.0:
+                features['market_maturity_stage'] = 0.8  # Mature market
+            elif market_size > 1.0:
+                features['market_maturity_stage'] = 0.6  # Growing market
+            else:
+                features['market_maturity_stage'] = 0.4  # Early market
+            
+            # Confidence scores based on data quality (REAL CALCULATION)
+            features['confidence_score'] = calculate_confidence_score(company, linkedin_profiles or [], market_analysis)
+            features['confidence_score_market'] = calculate_confidence_score_market(market_analysis)
+        else:
+            # If Perplexity fails, we skip the company (no defaults per requirement)
+            raise ValueError("Market analysis is required - cannot use defaults")
+        
         features['geographic_advantage'] = 0.8 if 'san francisco' in str(company.get('location', '')).lower() else 0.5
         
-        # Pitch quality (rule-based from description)
-        features['description_sentiment'] = 0.7  # Neutral-positive default
+        # 2. description_sentiment - Real calculation (TextBlob)
+        features['description_sentiment'] = calculate_description_sentiment(description)
+        
+        # 3. description_complexity - Real calculation (word count)
         features['description_complexity'] = len(description.split()) / 100.0 if description else 0.5
+        
+        # 4. about_quality - Real calculation (description length)
         features['about_quality'] = 0.7 if len(description) > 100 else 0.3
+        
+        # 5. sector_keyword_score - Real calculation
         features['sector_keyword_score'] = self._calculate_sector_score(description)
         
-        # Market position
-        features['founder_market_fit'] = 0.6  # Default
-        features['market_saturation_score'] = 0.4  # Growing market
-        features['differentiation_score'] = 0.6  # Default
+        # 6. founder_market_fit - Real calculation
+        categories = company.get('categories', [])
+        category_strings = [cat.get('value', '') if isinstance(cat, dict) else str(cat) for cat in categories]
+        features['founder_market_fit'] = calculate_founder_market_fit(
+            linkedin_profiles or [], market_analysis, category_strings
+        ) if linkedin_profiles and market_analysis else 0.5
         
-        # Temporal (use current market state)
-        features['momentum_3m'] = 0.8  # High AI momentum in 2025
-        features['timing_score_trend'] = 0.1  # Positive trend
-        features['competitor_growth_rate'] = 0.3  # Moderate growth
+        # 7. market_saturation_score - Real calculation
+        features['market_saturation_score'] = calculate_market_saturation_score(
+            features.get('competitor_count', 50),
+            features.get('market_size_billion', 100.0)
+        )
+        
+        # 8. differentiation_score - Real calculation
+        features['differentiation_score'] = calculate_differentiation_score(
+            description,
+            features.get('competitor_count', 50),
+            market_analysis
+        )
+        
+        # Note: Temporal features (momentum_3m, timing_score_trend, competitor_growth_rate) 
+        # and Phase 5 features removed - not in V11.6.1
         
         return features
     
-    def _extract_phase5_features(self, company: Dict, linkedin_profile: Optional[Dict]) -> Dict:
-        """Extract Phase 5 features."""
+    def _extract_phase5_features(self, company: Dict, linkedin_profiles: Optional[List[Dict]]) -> Dict:
+        """Extract Phase 5 features from multiple LinkedIn profiles."""
         features = {}
         
         description = company.get('description', '')
         
-        # Week 1: Serial founder features
-        experience = linkedin_profile.get('experience', []) if linkedin_profile else []
-        founder_keywords = ['founder', 'co-founder', 'cofounder', 'ceo']
-        
-        founder_count = sum(
-            1 for exp in experience
-            if any(kw in str(exp.get('title', '')).lower() for kw in founder_keywords)
-        )
-        
-        features['is_serial_founder'] = 1 if founder_count > 1 else 0
-        features['founder_experience_years'] = min(len(experience) * 2.5 / 20.0, 1.0) if experience else 0.0
-        
-        # Week 1: LinkedIn network estimates
-        industry_keywords = ['ai', 'ml', 'software', 'technology', 'startup']
-        industry_experience = sum(
-            1 for exp in experience
-            if any(kw in str(exp.get('title', '')).lower() + str(exp.get('company', '')).lower() 
-                  for kw in industry_keywords)
-        )
-        
-        if len(experience) > 0:
-            features['linkedin_industry_connections_ratio'] = 0.2 + (industry_experience / len(experience)) * 0.5
+        # Week 1: Serial founder features (aggregate across all founders)
+        if linkedin_profiles and len(linkedin_profiles) > 0:
+            all_experience = []
+            founder_keywords = ['founder', 'co-founder', 'cofounder', 'ceo']
+            
+            for profile in linkedin_profiles:
+                if profile:
+                    # Enrichlayer API returns 'experiences' (plural) not 'experience'
+                    experience = profile.get('experiences', profile.get('experience', []))
+                    all_experience.extend(experience)
+            
+            # Count founder roles across all profiles
+            founder_count = sum(
+                1 for exp in all_experience
+                if any(kw in str(exp.get('title', '')).lower() for kw in founder_keywords)
+            )
+            
+            features['is_serial_founder'] = 1 if founder_count > 1 else 0
+            features['founder_experience_years'] = min(len(all_experience) * 2.5 / 20.0, 1.0) if all_experience else 0.0
+            
+            # Week 1: LinkedIn network estimates (aggregate across all founders)
+            industry_keywords = ['ai', 'ml', 'software', 'technology', 'startup']
+            industry_experience = sum(
+                1 for exp in all_experience
+                if any(kw in str(exp.get('title', '')).lower() + str(exp.get('company', '')).lower() 
+                      for kw in industry_keywords)
+            )
+            
+            if len(all_experience) > 0:
+                features['linkedin_industry_connections_ratio'] = 0.2 + (industry_experience / len(all_experience)) * 0.5
+            else:
+                features['linkedin_industry_connections_ratio'] = 0.2
+            
+            features['linkedin_influencer_connections'] = 0.3 if founder_count > 0 else 0.1
         else:
+            features['is_serial_founder'] = 0
+            features['founder_experience_years'] = 0.0
             features['linkedin_industry_connections_ratio'] = 0.2
-        
-        features['linkedin_influencer_connections'] = 0.3 if founder_count > 0 else 0.1
-        features['linkedin_2nd_degree_reach'] = 0.0  # No connections count available
+            features['linkedin_influencer_connections'] = 0.1
         
         # Week 2: Barrier to entry
         barrier_keywords = ['ai', 'ml', 'deep learning', 'proprietary', 'patent']
         features['barrier_to_entry_score'] = 0.5 if any(kw in description.lower() for kw in barrier_keywords) else 0.3
         
-        # Week 3: Pitch quality (import from phase5_pitch_quality_features.py)
-        features.update(self._extract_pitch_quality(description))
+        # NOTE: Removed pitch quality features (4) - noise/not predictive
+        # NOTE: Removed linkedin_2nd_degree_reach - not available from Enrichlayer API
         
         return features
     
-    def _extract_pitch_quality(self, description: str) -> Dict:
-        """Extract pitch quality features."""
-        if not description:
-            return {
-                'pitch_clarity_score': 0.5,
-                'pitch_specificity_score': 0.0,
-                'vision_realism_score': 0.5,
-                'narrative_coherence_score': 0.0
-            }
-        
-        # Import pitch quality extraction
-        sys.path.append('.')
-        from phase5_pitch_quality_features import extract_pitch_quality_features
-        return extract_pitch_quality_features(description)
-    
     def _estimate_l_level(self, linkedin_profile: Dict) -> float:
         """Estimate founder L level from LinkedIn profile."""
-        experience = linkedin_profile.get('experience', [])
+        # Enrichlayer API returns 'experiences' (plural) not 'experience'
+        experience = linkedin_profile.get('experiences', linkedin_profile.get('experience', []))
         education = linkedin_profile.get('education', [])
         
         # Simple heuristic
@@ -416,7 +722,8 @@ class FeatureExtractor:
     
     def _calculate_experience_score(self, linkedin_profile: Dict) -> float:
         """Calculate founder experience score."""
-        experience = linkedin_profile.get('experience', [])
+        # Enrichlayer API returns 'experiences' (plural) not 'experience'
+        experience = linkedin_profile.get('experiences', linkedin_profile.get('experience', []))
         
         if not experience:
             return 0.3
@@ -491,7 +798,7 @@ class DatabaseService:
                  v11_5_score, predicted_probability, features, top_features, emailed, email_sent_at)
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (name) DO UPDATE SET
-                    v11_5_score = EXCLUDED.v11_5_score,
+                    v11_5_score = EXCLUDED.v11_5_score,  # Keep column name for compatibility
                     predicted_probability = EXCLUDED.predicted_probability,
                     emailed = EXCLUDED.emailed,
                     email_sent_at = CASE WHEN EXCLUDED.emailed THEN EXCLUDED.email_sent_at ELSE scored_companies.email_sent_at END,
@@ -666,7 +973,7 @@ class EmailAlertService:
             
             <div style="background: #f5f5f5; padding: 20px; border-radius: 8px; margin: 20px 0;">
                 <h3 style="margin-top: 0;">{company.get('name')}</h3>
-                <p><strong>V11.5 Score:</strong> <span style="font-size: 24px; color: {score_color}; font-weight: bold;">{score_result.get('score'):.1f}/10</span></p>
+                <p><strong>V11.6.1 Score:</strong> <span style="font-size: 24px; color: {score_color}; font-weight: bold;">{score_result.get('score'):.1f}/10</span></p>
                 <p style="color: {score_color}; font-weight: bold;">{alert_note}</p>
                 <p><strong>Probability:</strong> {score_result.get('probability'):.1%}</p>
                 <p><strong>Founded:</strong> {company.get('founded_on', 'N/A')}</p>
@@ -688,8 +995,8 @@ class EmailAlertService:
             <hr style="border: none; border-top: 1px solid #ddd; margin: 30px 0;">
             
             <p style="color: #999; font-size: 12px;">
-                This alert was generated by GGV Brain V11.5 (73.3% accuracy on historical data).
-                Model predicts funding efficiency based on 29 founding-time features.
+                This alert was generated by GGV Brain V11.6.1 (66.7% accuracy on historical data).
+                Model predicts funding efficiency based on 18 founding-time features (all using real calculations).
             </p>
         </body>
         </html>
@@ -708,9 +1015,10 @@ def main():
     logger.info("")
     
     # Initialize services
-    model = V11_5_Model()
+    model = V11_6_1_Model()
     crunchbase = CrunchbaseScanner(CRUNCHBASE_API_KEY)
     enrichlayer = EnrichlayerService(ENRICHLAYER_API_KEY)
+    perplexity = PerplexityMarketService(PERPLEXITY_API_KEY)
     feature_extractor = FeatureExtractor()
     email_service = EmailAlertService(RESEND_API_KEY, FROM_EMAIL, RECIPIENT_EMAIL)
     
@@ -739,21 +1047,85 @@ def main():
     for i, company in enumerate(companies, 1):
         logger.info(f"{i}/{len(companies)}: {company.get('name')}")
         
-        # Get LinkedIn profile for first founder
-        founder_identifiers = company.get('founder_identifiers', [])
-        linkedin_profile = None
-        linkedin_url = None
+        linkedin_urls = []  # Initialize outside try block
+        features = None
         
-        if founder_identifiers:
-            # For now, use placeholder - would need to get actual LinkedIn URL from Crunchbase
-            # This requires additional API call to get founder details
-            logger.info("  ⚠️ Founder LinkedIn extraction not implemented yet")
-            # TODO: Implement founder LinkedIn URL extraction
+        try:
+            # Step 1: Get founder details from Crunchbase (including LinkedIn URLs)
+            # First, get founder entity IDs and data from company entity using UUID
+            company_uuid = company.get('uuid', '')
+            founders = []
+            founder_identifiers = []
+            
+            if company_uuid:
+                # Get founder entity IDs and data from company entity endpoint
+                founder_identifiers, founders_from_card = crunchbase.get_founder_entity_ids_from_company(company_uuid)
+                if founders_from_card:
+                    # Use founder data from card (includes LinkedIn URLs)
+                    founders = founders_from_card
+                elif founder_identifiers:
+                    # Fallback: get full details using entity IDs
+                    founders = crunchbase.get_founder_details(founder_identifiers)
+            
+            # Fallback: use founder_identifiers from search if UUID method failed
+            if not founders:
+                founder_identifiers = company.get('founder_identifiers', [])
+                founders = crunchbase.get_founder_details(founder_identifiers) if founder_identifiers else []
+            
+            if not founders:
+                logger.warning(f"  ⚠️ No founder data available - skipping {company.get('name')}")
+                continue
+            
+            # Step 2: Get LinkedIn profiles for all founders via Enrichlayer
+            linkedin_profiles = []
+            for founder in founders:
+                linkedin_url = founder.get('linkedin_url')
+                if linkedin_url:
+                    linkedin_urls.append(linkedin_url)
+                    profile = enrichlayer.get_linkedin_profile(linkedin_url)
+                    if profile:
+                        linkedin_profiles.append(profile)
+                    else:
+                        logger.warning(f"  ⚠️ Could not fetch LinkedIn profile for {founder.get('name')}")
+            
+            if not linkedin_profiles:
+                logger.warning(f"  ⚠️ No LinkedIn profiles available - skipping {company.get('name')}")
+                continue
+            
+            # Step 3: Get market analysis from Perplexity (async)
+            categories = company.get('categories', [])
+            category_strings = [cat.get('value', '') if isinstance(cat, dict) else str(cat) for cat in categories]
+            
+            market_analysis = asyncio.run(perplexity.get_market_analysis(
+                company.get('name', ''),
+                company.get('description', ''),
+                category_strings
+            ))
+            
+            if not market_analysis:
+                logger.error(f"  ❌ Market analysis failed - skipping {company.get('name')} (no defaults per requirement)")
+                continue
+            
+            logger.info(f"  ✅ Market analysis: ${market_analysis.get('market_size_billion', 0):.2f}B, {market_analysis.get('cagr_percent', 0):.1f}% CAGR")
+            
+            # Step 4: Extract features with real data
+            features = feature_extractor.extract_features(company, linkedin_profiles, market_analysis)
+            
+        except ValueError as e:
+            # Market analysis required error
+            logger.error(f"  ❌ {e} - skipping {company.get('name')}")
+            continue
+        except Exception as e:
+            logger.error(f"  ❌ Error processing {company.get('name')}: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+            continue
         
-        # Extract features
-        features = feature_extractor.extract_features(company, linkedin_profile)
+        if features is None:
+            logger.warning(f"  ⚠️ Features not extracted - skipping {company.get('name')}")
+            continue
         
-        # Score with V11.5
+        # Score with V11.6.1
         score_result = model.score_founder(features)
         score = score_result.get('score', 0)
         
@@ -761,7 +1133,9 @@ def main():
         
         # Send email alert for every founder (regardless of score)
         # Email content will be classified appropriately based on score
-        email_sent = email_service.send_founder_alert(company, score_result, linkedin_url)
+        # Use first LinkedIn URL for email (or concatenate if multiple)
+        primary_linkedin_url = linkedin_urls[0] if linkedin_urls else None
+        email_sent = email_service.send_founder_alert(company, score_result, primary_linkedin_url)
         if email_sent:
             if score >= 8.0:
                 logger.info("  📧 Email alert sent (high potential)")
@@ -777,7 +1151,8 @@ def main():
         
         # Save to database (mark as emailed if email was sent)
         if db:
-            db.save_scored_company(company, score_result, linkedin_url, emailed=email_sent)
+            primary_linkedin_url = linkedin_urls[0] if linkedin_urls else None
+            db.save_scored_company(company, score_result, primary_linkedin_url, emailed=email_sent)
         
         companies_scored += 1
         
