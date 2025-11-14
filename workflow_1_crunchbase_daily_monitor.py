@@ -6,7 +6,7 @@ Workflow 1: Automated Daily Crunchbase Monitoring
 Daily cron job that:
 1. Scans Crunchbase for new AI companies (founded 2025, USA, with founder LinkedIn)
 2. Extracts 18 V11.6.1 features for each founder
-3. Scores with V11.6.1 model (66.7% accuracy)
+3. Scores with V11.6.1 2025-optimized model (trained on 2021-2024, 95.5% test accuracy)
 4. Saves all to PostgreSQL
 5. Emails jeff@goldengate.vc for all founders (classified by score)
 
@@ -71,17 +71,21 @@ FEATURE_ORDER = [
 
 
 class V11_6_1_Model:
-    """V11.6.1 model loader and scorer."""
+    """V11.6.1 model loader and scorer - Fully Normalized (trained on 2021-2024 data with normalized features)."""
     
-    def __init__(self, model_path='v11_6_1_model_20251112_170640.pkl',
-                 scaler_path='v11_6_1_scaler_20251112_170640.pkl'):
-        """Load V11.6.1 model and scaler."""
-        logger.info("Loading V11.6.1 model...")
+    def __init__(self, model_path='v11_6_1_fully_normalized_model_20251114_193248.pkl',
+                 scaler_path='v11_6_1_fully_normalized_scaler_20251114_193248.pkl'):
+        """Load V11.6.1 fully normalized model and scaler."""
+        logger.info("Loading V11.6.1 fully normalized model (trained on 2021-2024)...")
+        logger.info("  Features normalized to match current extraction pipeline:")
+        logger.info("    - timing_score: 0-5 → 0-1 scale")
+        logger.info("    - market_size_billion: TAM → SAM (÷19)")
+        logger.info("    - competitor_count: broad → direct (÷4.6)")
         
         self.model = pickle.load(open(model_path, 'rb'))
         self.scaler = pickle.load(open(scaler_path, 'rb'))
         
-        logger.info("✅ V11.6.1 model loaded successfully")
+        logger.info("✅ V11.6.1 fully normalized model loaded successfully")
     
     def score_founder(self, features: Dict) -> Dict:
         """
@@ -399,14 +403,53 @@ class PerplexityMarketService:
         self.api_key = api_key
         self.api_url = "https://api.perplexity.ai/chat/completions"
     
-    async def get_market_analysis(self, company_name: str, description: str, categories: List[str]) -> Optional[Dict]:
+    def is_generic_response(self, market_data: Dict) -> bool:
         """
-        Get market analysis from Perplexity API.
+        Detect if Perplexity returned generic/example values.
+        
+        Generic indicators:
+        - Exact example values (2500M, 25% CAGR, 35 competitors)
+        - Suspiciously round numbers (e.g., 2500, 25.0, 35)
+        - Common default combinations
+        """
+        if not market_data:
+            return False
+        
+        market_size = market_data.get('market_size_billion', 0) * 1000  # Convert to millions
+        cagr = market_data.get('cagr_percent', 0)
+        competitors = market_data.get('competitor_count', 0)
+        
+        # Check for exact example values
+        if abs(market_size - 2500) < 0.1 and abs(cagr - 25.0) < 0.1:
+            logger.warning(f"❌ Generic response detected: 2500M + 25% CAGR (example values)")
+            return True
+        
+        # Check for suspiciously round numbers (all three are round)
+        if (market_size % 500 == 0 and cagr % 5.0 == 0 and competitors % 5 == 0):
+            logger.warning(f"❌ Generic response detected: All round numbers ({market_size}M, {cagr}%, {competitors} competitors)")
+            return True
+        
+        # Check for common generic combinations
+        generic_combos = [
+            (2500, 25.0), (2000, 20.0), (3000, 30.0),
+            (1000, 15.0), (1500, 20.0)
+        ]
+        for generic_size, generic_cagr in generic_combos:
+            if abs(market_size - generic_size) < 0.1 and abs(cagr - generic_cagr) < 0.1:
+                logger.warning(f"❌ Generic response detected: Common combo ({generic_size}M, {generic_cagr}%)")
+                return True
+        
+        return False
+    
+    async def get_market_analysis(self, company_name: str, description: str, categories: List[str], max_retries: int = 2) -> Optional[Dict]:
+        """
+        Get market analysis from Perplexity API with retry logic for generic responses.
         
         Args:
             company_name: Company name
             description: Company description
             categories: List of category strings
+            max_retries: Maximum number of retry attempts if generic response detected (default: 2)
         
         Returns:
             Dictionary with market_size_millions, cagr_percent, competitor_count, timing_score, momentum_score
@@ -419,29 +462,38 @@ class PerplexityMarketService:
         category_str = ', '.join(categories) if categories else 'Technology'
         
         prompt = f"""
-        Analyze the market opportunity for this REAL startup:
+        Research and analyze the SPECIFIC market for this startup:
         
         Company: {company_name}
         Description: {description}
         Categories: {category_str}
         
-        Provide realistic market analysis focusing on:
-        1. Market size in millions USD (serviceable addressable market for startups - what a startup could realistically capture in 3-5 years)
-        2. CAGR percentage (realistic growth rate)
-        3. Competitor count (number of direct competitors)
-        4. Market timing score (0-1, how well timed is this market entry)
-        5. Market momentum score (0-1, how much momentum does this market have)
+        CRITICAL REQUIREMENTS:
+        1. Research THIS SPECIFIC COMPANY and its direct competitors (name at least 3 competitors)
+        2. Identify the NICHE market this company targets (not broad "AI" or "Software")
+        3. Calculate SERVICEABLE ADDRESSABLE MARKET (SAM) - what THIS startup can realistically capture in 3-5 years
+        4. Use PRECISE numbers with decimals (e.g., $847M, 18.3% CAGR, not round $2500M, 25%)
+        5. Provide UNIQUE analysis - DO NOT use generic estimates or example values
+        6. If precise data unavailable, estimate narrower niche market (smaller = more realistic)
         
-        IMPORTANT: Focus on the SERVICEABLE market that startups can realistically address, not the total industry size. Typical startup markets are $100M-$5B, not trillions.
+        Market Analysis Focus:
+        - Market size: $100M-$5B serviceable market (NOT total industry TAM)
+        - CAGR: Realistic growth rate with decimal precision (e.g., 18.7%, not 25%)
+        - Competitors: Exact count of direct competitors in THIS niche
+        - Timing: How well-timed is entry based on market maturity (0-1 scale, use decimals)
+        - Momentum: Current market momentum/hype (0-1 scale, use decimals)
         
-        Format your response as JSON:
+        Return JSON with ACTUAL research data (NOT example values):
         {{
-            "market_size_millions": 2500,
-            "cagr_percent": 25.0,
-            "competitor_count": 35.0,
-            "timing_score": 0.85,
-            "momentum_score": 0.80
+            "market_size_millions": <integer - precise estimate>,
+            "cagr_percent": <float - use decimals like 18.3>,
+            "competitor_count": <integer - exact count>,
+            "timing_score": <float 0-1 - use decimals like 0.73>,
+            "momentum_score": <float 0-1 - use decimals like 0.68>,
+            "data_confidence": <"high"|"medium"|"low">
         }}
+        
+        ⚠️ IMPORTANT: Each company should have DIFFERENT values. Avoid returning 2500/25.0 repeatedly.
         """
         
         try:
@@ -482,13 +534,24 @@ class PerplexityMarketService:
                                 market_size_millions = market_data.get('market_size_millions', 0)
                                 market_size_billions = market_size_millions / 1000.0 if market_size_millions > 0 else 0
                                 
-                                return {
+                                result = {
                                     'market_size_billion': market_size_billions,
                                     'cagr_percent': float(market_data.get('cagr_percent', 0)),
                                     'competitor_count': int(market_data.get('competitor_count', 0)),
                                     'timing_score': float(market_data.get('timing_score', 0)),
                                     'momentum_score': float(market_data.get('momentum_score', 0))
                                 }
+                                
+                                # Check if response is generic
+                                if self.is_generic_response(result):
+                                    if max_retries > 0:
+                                        logger.warning(f"⚠️ Retrying market analysis for {company_name} (attempts left: {max_retries})")
+                                        await asyncio.sleep(1)  # Brief delay before retry
+                                        return await self.get_market_analysis(company_name, description, categories, max_retries - 1)
+                                    else:
+                                        logger.warning(f"⚠️ All retries exhausted, accepting generic response for {company_name}")
+                                
+                                return result
                             except json.JSONDecodeError as e:
                                 logger.error(f"JSON decode error: {e}")
                                 logger.error(f"Content snippet: {content[:500]}")
@@ -596,8 +659,23 @@ class FeatureExtractor:
         # 3. description_complexity - Real calculation (word count)
         features['description_complexity'] = len(description.split()) / 100.0 if description else 0.5
         
-        # 4. about_quality - Real calculation (description length)
-        features['about_quality'] = 0.7 if len(description) > 100 else 0.3
+        # 4. about_quality - Real calculation (description quality metrics)
+        # Quality based on: length, word count, sentence structure
+        desc_len = len(description) if description else 0
+        word_count = len(description.split()) if description else 0
+        sentence_count = len([s for s in description.split('.') if s.strip()]) if description else 0
+        
+        # Normalize to 0-1 scale
+        # Length score (0-0.4): 0-50 chars = 0.1, 50-100 = 0.2, 100-200 = 0.3, 200+ = 0.4
+        length_score = min(0.4, desc_len / 500.0)
+        
+        # Word count score (0-0.3): more words = higher quality
+        word_score = min(0.3, word_count / 100.0)
+        
+        # Sentence structure score (0-0.3): more sentences = better structure
+        sentence_score = min(0.3, sentence_count / 10.0)
+        
+        features['about_quality'] = round(length_score + word_score + sentence_score, 3)
         
         # 5. sector_keyword_score - Real calculation
         features['sector_keyword_score'] = self._calculate_sector_score(description)
