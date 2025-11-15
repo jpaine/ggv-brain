@@ -5,8 +5,8 @@ Workflow 1: Automated Daily Crunchbase Monitoring
 
 Daily cron job that:
 1. Scans Crunchbase for new AI companies (founded 2025, USA, with founder LinkedIn)
-2. Extracts 18 V11.6.1 features for each founder
-3. Scores with V11.6.1 2025-optimized model (trained on 2021-2024, 95.5% test accuracy)
+2. Extracts 17 V11.7.1 features for each founder
+3. Scores with V11.7.1 early-stage model (trained on 2023-2024, ROC AUC 0.869, optimized for 0-1 year old companies)
 4. Saves all to PostgreSQL
 5. Emails jeff@goldengate.vc for all founders (classified by score)
 
@@ -47,7 +47,8 @@ RECIPIENT_EMAIL = os.getenv('RECIPIENT_EMAIL', 'jeff@goldengate.vc')
 FROM_EMAIL = os.getenv('FROM_EMAIL', 'ggv-brain@goldengate.vc')
 DATABASE_URL = os.getenv('DATABASE_URL')
 
-# V11.6.1 feature order (18 features total - all using real calculations)
+# V11.7.1 feature order (17 features total - all using real calculations)
+# Note: confidence_score_market removed (was 0.0% importance)
 FEATURE_ORDER = [
     'l_level',
     'estimated_age',
@@ -58,7 +59,6 @@ FEATURE_ORDER = [
     'competitor_count',
     'market_maturity_stage',
     'confidence_score',
-    'confidence_score_market',  # Real calculation from market data quality
     'geographic_advantage',
     'description_sentiment',
     'description_complexity',
@@ -70,26 +70,25 @@ FEATURE_ORDER = [
 ]
 
 
-class V11_6_1_Model:
-    """V11.6.1 model loader and scorer - Fully Normalized (trained on 2021-2024 data with normalized features)."""
+class V11_7_1_Model:
+    """V11.7.1 model loader and scorer - Early-Stage Optimized (trained on 2023-2024, 0-1 year old companies)."""
     
-    def __init__(self, model_path='v11_6_1_fully_normalized_model_20251114_193248.pkl',
-                 scaler_path='v11_6_1_fully_normalized_scaler_20251114_193248.pkl'):
-        """Load V11.6.1 fully normalized model and scaler."""
-        logger.info("Loading V11.6.1 fully normalized model (trained on 2021-2024)...")
-        logger.info("  Features normalized to match current extraction pipeline:")
-        logger.info("    - timing_score: 0-5 → 0-1 scale")
-        logger.info("    - market_size_billion: TAM → SAM (÷19)")
-        logger.info("    - competitor_count: broad → direct (÷4.6)")
+    def __init__(self, model_path='v11_7_1_fixed_distribution_model_20251114_214215.pkl',
+                 scaler_path='v11_7_1_fixed_distribution_scaler_20251114_214215.pkl'):
+        """Load V11.7.1 early-stage model and scaler."""
+        logger.info("Loading V11.7.1 early-stage model (trained on 2023-2024, 0-1 year old companies)...")
+        logger.info("  Performance: ROC AUC 0.869, Precision 81.2%, Recall 26.5%")
+        logger.info("  Features: 17 (removed confidence_score_market)")
+        logger.info("  Optimized for: Early-stage companies (0-1 years old)")
         
         self.model = pickle.load(open(model_path, 'rb'))
         self.scaler = pickle.load(open(scaler_path, 'rb'))
         
-        logger.info("✅ V11.6.1 fully normalized model loaded successfully")
+        logger.info("✅ V11.7.1 early-stage model loaded successfully")
     
     def score_founder(self, features: Dict) -> Dict:
         """
-        Score a founder with V11.6.1 model.
+        Score a founder with V11.7.1 model.
         
         Returns:
             Dict with score, probability, and feature importance
@@ -571,11 +570,11 @@ class PerplexityMarketService:
 
 
 class FeatureExtractor:
-    """Extract all 18 V11.6.1 features from company data (all using real calculations)."""
+    """Extract all 17 V11.7.1 features from company data (all using real calculations)."""
     
     def extract_features(self, company: Dict, linkedin_profiles: Optional[List[Dict]] = None, market_analysis: Optional[Dict] = None) -> Dict:
         """
-        Extract all 18 V11.6.1 features.
+        Extract all 17 V11.7.1 features.
         
         Args:
             company: Crunchbase company data
@@ -583,15 +582,15 @@ class FeatureExtractor:
             market_analysis: Perplexity market analysis data (optional)
         
         Returns:
-            Dictionary with all 18 features
+            Dictionary with all 17 features
         """
         features = {}
         
-        # Extract V11.6.1 features (18 features - all using real calculations)
+        # Extract V11.7.1 features (17 features - all using real calculations)
         features.update(self._extract_v11_4_features(company, linkedin_profiles, market_analysis))
         
-        # Note: Phase 5 features removed (not in V11.6.1)
-        # V11.6.1 uses only the 18 core features with real calculations
+        # Note: confidence_score_market removed (was 0.0% importance)
+        # V11.7.1 uses 17 core features with real calculations
         
         return features
     
@@ -614,15 +613,14 @@ class FeatureExtractor:
             features['l_level'] = 2.0
             features['founder_experience_score'] = 0.5
         
-        # V11.6.1: Use real calculations for all features (no hardcoded defaults)
+        # V11.7.1: Use real calculations for all features (no hardcoded defaults)
         from phase2_real_feature_calculations import (
             calculate_estimated_age,
             calculate_description_sentiment,
             calculate_founder_market_fit,
             calculate_market_saturation_score,
             calculate_differentiation_score,
-            calculate_confidence_score,
-            calculate_confidence_score_market
+            calculate_confidence_score
         )
         
         # 1. estimated_age - Real calculation from LinkedIn
@@ -644,9 +642,9 @@ class FeatureExtractor:
             else:
                 features['market_maturity_stage'] = 0.4  # Early market
             
-            # Confidence scores based on data quality (REAL CALCULATION)
+            # Confidence score based on data quality (REAL CALCULATION)
             features['confidence_score'] = calculate_confidence_score(company, linkedin_profiles or [], market_analysis)
-            features['confidence_score_market'] = calculate_confidence_score_market(market_analysis)
+            # Note: confidence_score_market removed (was 0.0% importance in V11.7.1)
         else:
             # If Perplexity fails, we skip the company (no defaults per requirement)
             raise ValueError("Market analysis is required - cannot use defaults")
@@ -701,7 +699,7 @@ class FeatureExtractor:
         )
         
         # Note: Temporal features (momentum_3m, timing_score_trend, competitor_growth_rate) 
-        # and Phase 5 features removed - not in V11.6.1
+        # and confidence_score_market removed - not in V11.7.1
         
         return features
     
@@ -1051,7 +1049,7 @@ class EmailAlertService:
             
             <div style="background: #f5f5f5; padding: 20px; border-radius: 8px; margin: 20px 0;">
                 <h3 style="margin-top: 0;">{company.get('name')}</h3>
-                <p><strong>V11.6.1 Score:</strong> <span style="font-size: 24px; color: {score_color}; font-weight: bold;">{score_result.get('score'):.1f}/10</span></p>
+                <p><strong>V11.7.1 Score:</strong> <span style="font-size: 24px; color: {score_color}; font-weight: bold;">{score_result.get('score'):.1f}/10</span></p>
                 <p style="color: {score_color}; font-weight: bold;">{alert_note}</p>
                 <p><strong>Probability:</strong> {score_result.get('probability'):.1%}</p>
                 <p><strong>Founded:</strong> {company.get('founded_on', 'N/A')}</p>
@@ -1073,8 +1071,8 @@ class EmailAlertService:
             <hr style="border: none; border-top: 1px solid #ddd; margin: 30px 0;">
             
             <p style="color: #999; font-size: 12px;">
-                This alert was generated by GGV Brain V11.6.1 (66.7% accuracy on historical data).
-                Model predicts funding efficiency based on 18 founding-time features (all using real calculations).
+                This alert was generated by GGV Brain V11.7.1 (ROC AUC 0.869, optimized for early-stage companies).
+                Model predicts funding efficiency based on 17 founding-time features (all using real calculations).
             </p>
         </body>
         </html>
@@ -1093,7 +1091,7 @@ def main():
     logger.info("")
     
     # Initialize services
-    model = V11_6_1_Model()
+    model = V11_7_1_Model()
     crunchbase = CrunchbaseScanner(CRUNCHBASE_API_KEY)
     enrichlayer = EnrichlayerService(ENRICHLAYER_API_KEY)
     perplexity = PerplexityMarketService(PERPLEXITY_API_KEY)
@@ -1203,7 +1201,7 @@ def main():
             logger.warning(f"  ⚠️ Features not extracted - skipping {company.get('name')}")
             continue
         
-        # Score with V11.6.1
+        # Score with V11.7.1
         score_result = model.score_founder(features)
         score = score_result.get('score', 0)
         
