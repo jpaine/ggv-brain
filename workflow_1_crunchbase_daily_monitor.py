@@ -43,8 +43,8 @@ CRUNCHBASE_API_KEY = os.getenv('CRUNCHBASE_API_KEY', '948f87e1734828b47f1232c4c4
 ENRICHLAYER_API_KEY = os.getenv('ENRICHLAYER_API_KEY', '-RbBxHU8AtMyH1dacibNKA')
 RESEND_API_KEY = os.getenv('RESEND_API_KEY', 're_4D7gm8JB_4An2NRYKxWT1VuFXabqPnhD3')
 PERPLEXITY_API_KEY = os.getenv('PERPLEXITY_API_KEY', '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')
-RECIPIENT_EMAIL = os.getenv('RECIPIENT_EMAIL', 'jeff@goldengate.vc')
-FROM_EMAIL = os.getenv('FROM_EMAIL', 'ggv-brain@goldengate.vc')
+RECIPIENT_EMAIL = os.getenv('RECIPIENT_EMAIL', 'jeffrey.paine@gmail.com')  # Using verified email until goldengate.vc domain is verified in Resend
+FROM_EMAIL = os.getenv('FROM_EMAIL', 'onboarding@resend.dev')  # Using Resend verified domain
 DATABASE_URL = os.getenv('DATABASE_URL')
 
 # V11.7.1 feature order (17 features total - all using real calculations)
@@ -1119,6 +1119,7 @@ def main():
     # Process each company
     high_score_count = 0
     companies_scored = 0
+    emails_sent_count = 0
     
     for i, company in enumerate(companies, 1):
         logger.info(f"{i}/{len(companies)}: {company.get('name')}")
@@ -1213,6 +1214,7 @@ def main():
         primary_linkedin_url = linkedin_urls[0] if linkedin_urls else None
         email_sent = email_service.send_founder_alert(company, score_result, primary_linkedin_url)
         if email_sent:
+            emails_sent_count += 1
             if score >= 8.0:
                 logger.info("  📧 Email alert sent (high potential)")
                 high_score_count += 1
@@ -1241,7 +1243,7 @@ def main():
     logger.info(f"Companies scanned: {len(companies)}")
     logger.info(f"Companies scored: {companies_scored}")
     logger.info(f"High-potential founders (>= 8.0): {high_score_count}")
-    logger.info(f"Total email alerts sent: {companies_scored}")
+    logger.info(f"Total email alerts sent: {emails_sent_count}")
     run_end = datetime.now()
     logger.info(f"Completed: {run_end.strftime('%Y-%m-%d %H:%M:%S')}")
     
@@ -1253,7 +1255,7 @@ def main():
                 companies_found=len(companies),
                 companies_scored=companies_scored,
                 high_scores_count=high_score_count,
-                emails_sent=high_score_count,
+                emails_sent=emails_sent_count,
                 duration_seconds=int((run_end - run_start).total_seconds()),
             )
         except Exception as e:
