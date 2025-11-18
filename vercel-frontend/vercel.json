@@ -1,0 +1,25 @@
+{
+  "version": 2,
+  "builds": [
+    {
+      "src": "app/api/process/route.py",
+      "use": "@vercel/python"
+    },
+    {
+      "src": "package.json",
+      "use": "@vercel/next"
+    }
+  ],
+  "routes": [
+    {
+      "src": "/api/process",
+      "dest": "app/api/process/route.py"
+    }
+  ],
+  "functions": {
+    "app/api/process/route.py": {
+      "maxDuration": 60
+    }
+  }
+}
+
