@@ -130,6 +130,23 @@ class V11_7_1_Model:
 class CrunchbaseScanner:
     """Scan Crunchbase for new AI companies."""
     
+    # AI-related categories to filter for
+    AI_CATEGORIES = [
+        "artificial_intelligence",
+        "machine_learning",
+        "deep_learning",
+        "natural_language_processing",
+        "computer_vision",
+        "robotics",
+        "generative_ai",
+        "big_data",
+        "data_analytics",
+        "data_science",
+        "automation",
+        "predictive_analytics",
+        "autonomous_vehicles"
+    ]
+    
     def __init__(self, api_key: str):
         self.api_key = api_key
         self.base_url = "https://api.crunchbase.com/api/v4"
@@ -145,6 +162,7 @@ class CrunchbaseScanner:
             List of company dictionaries
         """
         logger.info(f"Searching Crunchbase for new AI companies (last {days_back} days)...")
+        logger.info(f"  Filtering for {len(self.AI_CATEGORIES)} AI-related categories")
         
         # Date range
         now = datetime.now()
@@ -159,7 +177,7 @@ class CrunchbaseScanner:
             'X-cb-user-key': self.api_key
         }
         
-        # Search payload
+        # Search payload with category filter
         payload = {
             "field_ids": [
                 "identifier", "name", "short_description", "description",
@@ -171,13 +189,19 @@ class CrunchbaseScanner:
                     "type": "predicate",
                     "field_id": "founded_on",
                     "operator_id": "gte",
-                        "values": [start_date]
+                    "values": [start_date]
                 },
                 {
                     "type": "predicate",
                     "field_id": "founded_on",
                     "operator_id": "lte",
                     "values": [end_date]
+                },
+                {
+                    "type": "predicate",
+                    "field_id": "categories",
+                    "operator_id": "contains_any",  # Company has ANY of these categories
+                    "values": self.AI_CATEGORIES
                 }
             ],
             "limit": 100
@@ -227,7 +251,7 @@ class CrunchbaseScanner:
                             'founder_identifiers': founder_identifiers  # Keep original for now
                         })
                 
-                logger.info(f"✅ Found {len(companies)} companies (filtered for USA + founders)")
+                logger.info(f"✅ Found {len(companies)} companies (filtered for AI categories + USA + founders)")
                 return companies
             else:
                 logger.error(f"Crunchbase API error: {response.status_code} - {response.text[:200]}")
