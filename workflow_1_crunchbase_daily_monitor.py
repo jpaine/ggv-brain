@@ -844,35 +844,57 @@ class FeatureExtractor:
         experience = linkedin_profile.get('experiences', linkedin_profile.get('experience', []))
         education = linkedin_profile.get('education', [])
         
-        # Simple heuristic
-        score = 2.0  # Base L2
+        # Start at L1 (first-time founders)
+        score = 1.0  # Base L1
         
-        # Check for founder experience
+        # Check for SERIAL founder experience (multiple founder roles = L2+)
         founder_keywords = ['founder', 'co-founder', 'ceo']
-        has_founder_exp = any(
-            any(kw in str(exp.get('title', '')).lower() for kw in founder_keywords)
-            for exp in experience
-        )
-        if has_founder_exp:
-            score += 1.0  # L3
+        founder_roles = [
+            exp for exp in experience
+            if any(kw in str(exp.get('title', '')).lower() for kw in founder_keywords)
+        ]
+        founder_count = len(founder_roles)
         
-        # Check for top company experience
+        if founder_count > 1:
+            # Serial founder (multiple companies) = L2
+            score = 2.0
+        elif founder_count == 1:
+            # First-time founder, but check for other signals
+            # If they have top company or top school, they're L2
+            # Otherwise stay at L1
+            pass  # Will check other signals below
+        
+        # Check for top company experience (bumps L1 to L2, or adds to existing)
         top_companies = ['google', 'facebook', 'amazon', 'microsoft', 'apple', 'openai', 'anthropic']
         has_top_company = any(
             any(comp in str(exp.get('company', '')).lower() for comp in top_companies)
             for exp in experience
         )
         if has_top_company:
-            score += 0.5
+            if score < 2.0:
+                score = 2.0  # Top company = minimum L2
+            else:
+                score += 0.5  # Add to existing score
         
-        # Check for education
+        # Check for education (bumps L1 to L2, or adds to existing)
         top_schools = ['stanford', 'mit', 'harvard', 'berkeley', 'carnegie mellon']
         has_top_school = any(
             any(school in str(edu.get('school', '')).lower() for school in top_schools)
             for edu in education
         )
         if has_top_school:
-            score += 0.5
+            if score < 2.0:
+                score = 2.0  # Top school = minimum L2
+            else:
+                score += 0.5  # Add to existing score
+        
+        # L3+ requires multiple strong signals
+        if score >= 2.5:
+            score = 3.0  # L3: Serial founder + top company/school, or multiple strong signals
+        
+        # L4+ requires exceptional background
+        if (founder_count > 1 and has_top_company) or (has_top_company and has_top_school):
+            score = 4.0  # L4: Serial founder with top company, or top company + top school
         
         return min(score, 7.0)  # Cap at L7
     
