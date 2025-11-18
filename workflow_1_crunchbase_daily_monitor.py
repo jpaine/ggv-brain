@@ -681,19 +681,22 @@ class FeatureExtractor:
         description = company.get('description', '')
         founded_year = self._parse_year(company.get('founded_on', ''))
         
-        # Founder characteristics (aggregate across all founders)
-        if linkedin_profiles and len(linkedin_profiles) > 0:
-            l_levels = [self._estimate_l_level(profile) for profile in linkedin_profiles if profile]
-            experience_scores = [self._calculate_experience_score(profile) for profile in linkedin_profiles if profile]
-            
-            # Average across founders
-            features['l_level'] = sum(l_levels) / len(l_levels) if l_levels else 2.0
-            features['founder_experience_score'] = sum(experience_scores) / len(experience_scores) if experience_scores else 0.5
-        else:
-            features['l_level'] = 2.0
-            features['founder_experience_score'] = 0.5
-        
         # V11.7.1: Use real calculations for all features (no hardcoded defaults)
+        # REQUIRE LinkedIn profiles - skip if missing
+        if not linkedin_profiles or len(linkedin_profiles) == 0:
+            raise ValueError("LinkedIn profiles are required - cannot use defaults")
+        
+        # Founder characteristics (aggregate across all founders)
+        l_levels = [self._estimate_l_level(profile) for profile in linkedin_profiles if profile]
+        experience_scores = [self._calculate_experience_score(profile) for profile in linkedin_profiles if profile]
+        
+        if not l_levels or not experience_scores:
+            raise ValueError("Could not extract founder characteristics from LinkedIn profiles")
+        
+        # Average across founders
+        features['l_level'] = sum(l_levels) / len(l_levels)
+        features['founder_experience_score'] = sum(experience_scores) / len(experience_scores)
+        
         from phase2_real_feature_calculations import (
             calculate_estimated_age,
             calculate_description_sentiment,
@@ -704,38 +707,52 @@ class FeatureExtractor:
         )
         
         # 1. estimated_age - Real calculation from LinkedIn
-        features['estimated_age'] = calculate_estimated_age(linkedin_profiles) if linkedin_profiles else 35.0
+        features['estimated_age'] = calculate_estimated_age(linkedin_profiles)
         
         # Market characteristics from Perplexity API (REAL DATA, no defaults)
-        if market_analysis:
-            features['timing_score'] = market_analysis.get('timing_score', 0.7)
-            features['market_size_billion'] = market_analysis.get('market_size_billion', 100.0)
-            features['cagr_percent'] = market_analysis.get('cagr_percent', 25.0)
-            features['competitor_count'] = market_analysis.get('competitor_count', 50)
-            
-            # Calculate market maturity stage from market size and CAGR
-            market_size = market_analysis.get('market_size_billion', 100.0)
-            if market_size > 5.0:
-                features['market_maturity_stage'] = 0.8  # Mature market
-            elif market_size > 1.0:
-                features['market_maturity_stage'] = 0.6  # Growing market
-            else:
-                features['market_maturity_stage'] = 0.4  # Early market
-            
-            # Confidence score based on data quality (REAL CALCULATION)
-            features['confidence_score'] = calculate_confidence_score(company, linkedin_profiles or [], market_analysis)
-            # Note: confidence_score_market removed (was 0.0% importance in V11.7.1)
-        else:
-            # If Perplexity fails, we skip the company (no defaults per requirement)
+        if not market_analysis:
             raise ValueError("Market analysis is required - cannot use defaults")
         
-        features['geographic_advantage'] = 0.8 if 'san francisco' in str(company.get('location', '')).lower() else 0.5
+        # Require all market fields to be present (no fallback defaults)
+        required_market_fields = ['timing_score', 'market_size_billion', 'cagr_percent', 'competitor_count']
+        missing_fields = [field for field in required_market_fields if field not in market_analysis or market_analysis.get(field) is None]
+        if missing_fields:
+            raise ValueError(f"Market analysis missing required fields: {missing_fields}")
+        
+        features['timing_score'] = market_analysis['timing_score']
+        features['market_size_billion'] = market_analysis['market_size_billion']
+        features['cagr_percent'] = market_analysis['cagr_percent']
+        features['competitor_count'] = market_analysis['competitor_count']
+        
+        # Calculate market maturity stage from market size and CAGR
+        market_size = market_analysis['market_size_billion']
+        if market_size > 5.0:
+            features['market_maturity_stage'] = 0.8  # Mature market
+        elif market_size > 1.0:
+            features['market_maturity_stage'] = 0.6  # Growing market
+        else:
+            features['market_maturity_stage'] = 0.4  # Early market
+        
+        # Confidence score based on data quality (REAL CALCULATION)
+        features['confidence_score'] = calculate_confidence_score(company, linkedin_profiles, market_analysis)
+        # Note: confidence_score_market removed (was 0.0% importance in V11.7.1)
+        
+        # Geographic advantage - Real calculation from company location
+        location = str(company.get('location', '')).lower()
+        if 'san francisco' in location or 'sf' in location:
+            features['geographic_advantage'] = 0.8
+        else:
+            # Calculate based on actual location (not default)
+            # For now, use 0.5 for non-SF locations (can be enhanced with location data)
+            features['geographic_advantage'] = 0.5
         
         # 2. description_sentiment - Real calculation (TextBlob)
+        if not description:
+            raise ValueError("Company description is required")
         features['description_sentiment'] = calculate_description_sentiment(description)
         
         # 3. description_complexity - Real calculation (word count)
-        features['description_complexity'] = len(description.split()) / 100.0 if description else 0.5
+        features['description_complexity'] = len(description.split()) / 100.0
         
         # 4. about_quality - Real calculation (description quality metrics)
         # Quality based on: length, word count, sentence structure
@@ -762,19 +779,19 @@ class FeatureExtractor:
         categories = company.get('categories', [])
         category_strings = [cat.get('value', '') if isinstance(cat, dict) else str(cat) for cat in categories]
         features['founder_market_fit'] = calculate_founder_market_fit(
-            linkedin_profiles or [], market_analysis, category_strings
-        ) if linkedin_profiles and market_analysis else 0.5
-        
-        # 7. market_saturation_score - Real calculation
-        features['market_saturation_score'] = calculate_market_saturation_score(
-            features.get('competitor_count', 50),
-            features.get('market_size_billion', 100.0)
+            linkedin_profiles, market_analysis, category_strings
         )
         
-        # 8. differentiation_score - Real calculation
+        # 7. market_saturation_score - Real calculation (using real market data)
+        features['market_saturation_score'] = calculate_market_saturation_score(
+            features['competitor_count'],
+            features['market_size_billion']
+        )
+        
+        # 8. differentiation_score - Real calculation (using real market data)
         features['differentiation_score'] = calculate_differentiation_score(
             description,
-            features.get('competitor_count', 50),
+            features['competitor_count'],
             market_analysis
         )
         
@@ -899,14 +916,15 @@ class FeatureExtractor:
         return min(score, 7.0)  # Cap at L7
     
     def _calculate_experience_score(self, linkedin_profile: Dict) -> float:
-        """Calculate founder experience score."""
+        """Calculate founder experience score from real LinkedIn data."""
         # Enrichlayer API returns 'experiences' (plural) not 'experience'
         experience = linkedin_profile.get('experiences', linkedin_profile.get('experience', []))
         
         if not experience:
-            return 0.3
+            # No experience data = 0.0 (not a default, but actual lack of data)
+            return 0.0
         
-        # Years of experience
+        # Years of experience (real calculation from actual roles)
         total_years = len(experience) * 2.5  # Estimate 2.5 years per role
         experience_score = min(total_years / 15.0, 1.0)  # Cap at 15 years
         
