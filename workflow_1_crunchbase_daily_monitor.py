@@ -177,7 +177,7 @@ class CrunchbaseScanner:
             'X-cb-user-key': self.api_key
         }
         
-        # Search payload with category filter
+        # Search payload (category filtering done post-search)
         payload = {
             "field_ids": [
                 "identifier", "name", "short_description", "description",
@@ -196,12 +196,6 @@ class CrunchbaseScanner:
                     "field_id": "founded_on",
                     "operator_id": "lte",
                     "values": [end_date]
-                },
-                {
-                    "type": "predicate",
-                    "field_id": "categories",
-                    "operator_id": "contains_any",  # Company has ANY of these categories
-                    "values": self.AI_CATEGORIES
                 }
             ],
             "limit": 100
@@ -218,6 +212,36 @@ class CrunchbaseScanner:
                 for entity in entities:
                     props = entity.get('properties', {})
                     entity_uuid = entity.get('uuid', '')  # Get UUID from entity, not from props
+                    
+                    # Filter for AI categories
+                    categories = props.get('categories', [])
+                    category_values = []
+                    for cat in categories:
+                        if isinstance(cat, dict):
+                            cat_value = cat.get('value', '')
+                            if cat_value:
+                                category_values.append(cat_value.lower())
+                        else:
+                            category_values.append(str(cat).lower())
+                    
+                    # Check if company has ANY of our AI categories
+                    # Match by exact category slug or by category name containing our keywords
+                    has_ai_category = False
+                    for cat_val in category_values:
+                        # Exact match (e.g., "artificial_intelligence")
+                        if cat_val in self.AI_CATEGORIES:
+                            has_ai_category = True
+                            break
+                        # Partial match (e.g., category contains "artificial_intelligence")
+                        for ai_cat in self.AI_CATEGORIES:
+                            if ai_cat.replace('_', ' ') in cat_val or ai_cat in cat_val:
+                                has_ai_category = True
+                                break
+                        if has_ai_category:
+                            break
+                    
+                    if not has_ai_category:
+                        continue  # Skip non-AI companies
                     
                     # Filter for USA and has founder LinkedIn
                     location = props.get('location_identifiers', [])
