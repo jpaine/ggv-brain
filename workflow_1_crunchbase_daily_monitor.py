@@ -73,6 +73,27 @@ FEATURE_ORDER = [
 class V11_7_1_Model:
     """V11.7.1 model loader and scorer - Early-Stage Optimized (trained on 2023-2024, 0-1 year old companies)."""
     
+    # 99th percentile values from training data (for proper outlier capping)
+    FEATURE_P99_VALUES = {
+        'l_level': 7.0,  # L7 is max
+        'estimated_age': 65.000,
+        'founder_experience_score': 0.950,
+        'timing_score': 4.500,
+        'market_size_billion': 142.300,
+        'cagr_percent': 45.400,
+        'competitor_count': 25.000,
+        'market_maturity_stage': 1.000,
+        'confidence_score': 0.680,
+        'geographic_advantage': 1.000,
+        'description_sentiment': 0.900,
+        'description_complexity': 0.941,
+        'about_quality': 1.000,
+        'sector_keyword_score': 1.000,
+        'founder_market_fit': 1.000,
+        'market_saturation_score': 1.000,
+        'differentiation_score': 0.667,
+    }
+    
     def __init__(self, model_path='v11_7_1_fixed_distribution_model_20251114_214215.pkl',
                  scaler_path='v11_7_1_fixed_distribution_scaler_20251114_214215.pkl'):
         """Load V11.7.1 early-stage model and scaler."""
@@ -96,9 +117,17 @@ class V11_7_1_Model:
         # Prepare feature vector in correct order
         feature_vector = [features.get(feat, 0.0) for feat in FEATURE_ORDER]
         
-        # Cap outliers at 99th percentile (from training)
-        # For production, use conservative defaults if outliers detected
-        feature_vector_capped = [min(val, 1.0) if val > 0 else val for val in feature_vector]
+        # Cap outliers at 99th percentile (matching training data)
+        feature_vector_capped = []
+        for i, (feat_name, feat_value) in enumerate(zip(FEATURE_ORDER, feature_vector)):
+            p99 = self.FEATURE_P99_VALUES.get(feat_name, None)
+            if p99 is not None:
+                # Cap at 99th percentile (upper bound only, preserve negative values if any)
+                capped_value = min(feat_value, p99) if feat_value > 0 else feat_value
+            else:
+                # No p99 value, use as-is (shouldn't happen for V11.7.1 features)
+                capped_value = feat_value
+            feature_vector_capped.append(capped_value)
         
         # Normalize
         features_scaled = self.scaler.transform([feature_vector_capped])
