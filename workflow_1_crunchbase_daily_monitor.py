@@ -527,7 +527,10 @@ class PerplexityMarketService:
                         
                         if json_match:
                             try:
-                                market_data = json.loads(json_match.group())
+                                # Clean JSON: remove underscores from numbers (Python syntax, not JSON)
+                                json_str = json_match.group()
+                                json_str = re.sub(r'(\d+)_(\d+)', r'\1\2', json_str)  # Remove underscores in numbers
+                                market_data = json.loads(json_str)
                                 
                                 # Convert market_size_millions to billions for feature
                                 market_size_millions = market_data.get('market_size_millions', 0)
